@@ -1,0 +1,660 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "qfPGQJoPE8gf",
+   "metadata": {
+    "id": "qfPGQJoPE8gf"
+   },
+   "outputs": [],
+   "source": [
+    "!pip install datasets > /dev/null"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "90ff67e2-7f3d-47fb-b6dd-b795fd5d4007",
+   "metadata": {
+    "id": "90ff67e2-7f3d-47fb-b6dd-b795fd5d4007"
+   },
+   "outputs": [],
+   "source": [
+    "import sys  # модуль для взаємодії з системою\n",
+    "from typing import List, Tuple, Mapping  # використовуємо для визначення типів даних\n",
+    "\n",
+    "import datasets  # бібліотека для роботи з даними\n",
+    "from tqdm import tqdm  # для створення прогрес-бару\n",
+    "import numpy as np  # для роботи з масивами даних\n",
+    "import matplotlib.pyplot as plt  # для візуалізації\n",
+    "\n",
+    "import torch  # бібліотека для навчання нейромереж\n",
+    "import torch.nn as nn  # модуль нейронних мереж\n",
+    "import torch.optim as optim  # оптимізатори\n",
+    "import torch.nn.functional as F  # функціональні операції над тензорами\n",
+    "from torch.nn.utils.rnn import pad_sequence  # для вирівнювання послідовностей\n",
+    "from torch.utils.data import Dataset, DataLoader  # для роботи з даними та завантаження їх у модель"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "tidOXR2lFKvY",
+   "metadata": {
+    "id": "tidOXR2lFKvY"
+   },
+   "source": [
+    "## Dataset\n",
+    "\n",
+    "**[HuggingFace](https://huggingface.co/datasets/benjamin/ner-uk)** <br>\n",
+    "**[GitHub](https://github.com/lang-uk/ner-uk/tree/master)**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7f87a917-3b53-4a0e-a53c-0a024210afba",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "7f87a917-3b53-4a0e-a53c-0a024210afba",
+    "outputId": "7d25fb49-2c6d-4d02-9be1-1c3dfd2d9260"
+   },
+   "outputs": [],
+   "source": [
+    "dataset = datasets.load_dataset(\"benjamin/ner-uk\")  # завантаження набору даних для розпізнавання іменованих сутностей українською мовою\n",
+    "dataset  # виведення набору даних"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ef02c955-d66f-46d5-8c7f-f14edbf7256d",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "ef02c955-d66f-46d5-8c7f-f14edbf7256d",
+    "outputId": "e1aa6e49-0d67-41a9-d84b-2437440200da"
+   },
+   "outputs": [],
+   "source": [
+    "# NOTE: буде використано для вирівнювання вхідних послідовностей.\n",
+    "TOK_PAD_ID = 0\n",
+    "\n",
+    "vocab = {\"<PAD>\": TOK_PAD_ID}  # словник, починаємо з індексу для заповнення\n",
+    "curr_idx = 1  # поточний індекс для індексування слів\n",
+    "for split in (\"train\", \"validation\", \"test\"):  # проходимо по наборах даних для навчання, валідації та тестування\n",
+    "    for sample in dataset[split]:  # проходимо по кожному зразку в наборі даних\n",
+    "        for word in sample[\"tokens\"]:  # проходимо по кожному слову в токенах зразку\n",
+    "            if word not in vocab:  # якщо слово ще не зустрічалося\n",
+    "                vocab[word] = curr_idx  # додаємо його до словника з поточним індексом\n",
+    "                curr_idx += 1  # збільшуємо поточний індекс\n",
+    "\n",
+    "print(\"Vocab size:\", len(vocab))  # виводимо розмір словника"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "38de5b35-f19e-486f-99e9-9f71f24d5098",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "38de5b35-f19e-486f-99e9-9f71f24d5098",
+    "outputId": "111ec69f-4a88-42aa-ab94-cf6370f7bea7"
+   },
+   "outputs": [],
+   "source": [
+    "# NOTE: буде використано це значення для вирівнювання міток,\n",
+    "#       у функції CrossEntropyLoss є спеціальний параметр, який називається 'ignore_index'\n",
+    "#       і він ігноруватиме мітки з цим значенням (обчислення втрат\n",
+    "#       буде пропущено для міток, які дорівнюють цьому значенню)\n",
+    "NER_PAD_ID = -100\n",
+    "\n",
+    "targets = set()  # множина для зберігання унікальних міток іменованих сутностей\n",
+    "for split in (\"train\", \"validation\", \"test\"):  # проходимо по наборах даних для навчання, валідації та тестування\n",
+    "    for sample in dataset[split]:  # проходимо по кожному зразку в наборі даних\n",
+    "        targets.update(sample[\"ner_tags\"])  # додаємо усі мітки зразку до множини\n",
+    "\n",
+    "targets = sorted(targets)  # сортуємо унікальні мітки\n",
+    "print(\"Unique targets:\", len(targets))  # виводимо кількість унікальних міток\n",
+    "targets  # виводимо унікальні мітки"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "5745311f-5198-4ccc-9985-e3b9f0289bac",
+   "metadata": {
+    "id": "5745311f-5198-4ccc-9985-e3b9f0289bac"
+   },
+   "source": [
+    "## PyTorch Datasets & DataLoaders"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "08a15fa0-7962-4d7f-9dd0-a95300b2ca30",
+   "metadata": {
+    "id": "08a15fa0-7962-4d7f-9dd0-a95300b2ca30"
+   },
+   "outputs": [],
+   "source": [
+    "class NERDataset(Dataset):\n",
+    "    def __init__(self, samples: datasets.Dataset, vocabulary: Mapping[str, int]) -> None:\n",
+    "        self.samples = samples  # зразки даних\n",
+    "        self.vocabulary = vocabulary  # словник токенів та їх індексів\n",
+    "\n",
+    "    def __len__(self) -> int:\n",
+    "        return len(self.samples)  # повертаємо загальну кількість зразків у наборі даних\n",
+    "\n",
+    "    def __getitem__(self, index: int) -> Tuple[torch.LongTensor, torch.LongTensor]:\n",
+    "        sample = self.samples[index]  # вибираємо зразок за індексом\n",
+    "        doc = torch.LongTensor([self.vocabulary[token] for token in sample[\"tokens\"]])  # індексуємо токени зразка\n",
+    "        label = torch.LongTensor(sample[\"ner_tags\"])  # конвертуємо мітки іменованих сутностей у тензор\n",
+    "        return doc, label  # повертаємо тензор токенів та міток іменованих сутностей\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "fd23ddfe-9768-4a1d-bc81-51e8c140ccb1",
+   "metadata": {
+    "id": "fd23ddfe-9768-4a1d-bc81-51e8c140ccb1"
+   },
+   "outputs": [],
+   "source": [
+    "def seq_collate_fn(\n",
+    "    batch: List[Tuple[torch.LongTensor, torch.LongTensor]], data_pad: int, label_pad: int\n",
+    ") -> Tuple[torch.LongTensor, torch.LongTensor]:\n",
+    "    \"\"\"Combine samples into batch that can be used laten by RNN model.\n",
+    "\n",
+    "    Args:\n",
+    "        batch: list with tensors that should be packed into batch.\n",
+    "            Expected that each list sample will be a tuple of (text_tokens, label_tokens).\n",
+    "        data_pad: value to use for padding text tokens.\n",
+    "        label_pad: value to use for padding label tokens.\n",
+    "\n",
+    "    Returns:\n",
+    "        Padded and packed into batch text tokens and padded and packed into batch label tokens.\n",
+    "    \"\"\"\n",
+    "    token_ids = pad_sequence([item[0] for item in batch], batch_first=True, padding_value=data_pad)\n",
+    "    label_ids = pad_sequence([item[1] for item in batch], batch_first=True, padding_value=label_pad)\n",
+    "    return token_ids, label_ids\n",
+    "\n",
+    "\n",
+    "def ner_collate_fn(batch: List[Tuple[torch.LongTensor, torch.LongTensor]]) -> Tuple[torch.LongTensor, torch.LongTensor]:\n",
+    "    \"\"\"Collator function for our NER dataset.\n",
+    "\n",
+    "    Args:\n",
+    "        batch: list with tensors that should be packed into batch.\n",
+    "            Expected that each list sample will be a tuple of (text_tokens, label_tokens).\n",
+    "\n",
+    "    Returns:\n",
+    "        Padded and packed into batch text tokens and padded and packed into batch label tokens.\n",
+    "    \"\"\"\n",
+    "    return seq_collate_fn(batch, TOK_PAD_ID, NER_PAD_ID)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e50a98db-01a0-4fbd-be8a-b8fa338f1a9c",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "e50a98db-01a0-4fbd-be8a-b8fa338f1a9c",
+    "outputId": "ac03e382-551e-402e-afcf-12665002ebad"
+   },
+   "outputs": [],
+   "source": [
+    "train_dataset = NERDataset(dataset[\"train\"], vocab)  # набір даних для навчання\n",
+    "validation_dataset = NERDataset(dataset[\"validation\"], vocab)  # набір даних для валідації\n",
+    "test_dataset = NERDataset(dataset[\"test\"], vocab)  # набір даних для тестування\n",
+    "\n",
+    "len(train_dataset), len(validation_dataset), len(test_dataset)  # вивід кількості зразків у кожному наборі даних"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "731a341a-6b1c-4b76-93cb-47d1aacc2537",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "731a341a-6b1c-4b76-93cb-47d1aacc2537",
+    "outputId": "17a7e931-da7e-42bc-f670-d743324be9a1"
+   },
+   "outputs": [],
+   "source": [
+    "batch_size = 64\n",
+    "\n",
+    "train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=ner_collate_fn)\n",
+    "validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, collate_fn=ner_collate_fn)\n",
+    "test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=ner_collate_fn)\n",
+    "\n",
+    "len(train_loader), len(validation_loader), len(test_loader)  # вивід кількості пакетів у кожному завантажувачі даних"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "681b641c-219a-4803-86c0-a2f7cc06bcb5",
+   "metadata": {
+    "id": "681b641c-219a-4803-86c0-a2f7cc06bcb5"
+   },
+   "source": [
+    "# Training & Evaluation"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "t3X87ZY_BKrr",
+   "metadata": {
+    "id": "t3X87ZY_BKrr"
+   },
+   "outputs": [],
+   "source": [
+    "def sequence_f1(true_labels: np.array, predicted_labels: np.array) -> np.array:\n",
+    "    \"\"\"F1 score for one sequence.\n",
+    "\n",
+    "    Args:\n",
+    "        true_labels: ground truth labels.\n",
+    "        predicted_labels: model predictions.\n",
+    "\n",
+    "    Returns:\n",
+    "        F1 scores for each class.\n",
+    "    \"\"\"\n",
+    "    assert len(true_labels) == len(predicted_labels), \"Mismatched length between true labels and predicted labels\"\n",
+    "\n",
+    "    scores = []  # список для зберігання значень F1 для кожного класу\n",
+    "    for _cls in targets:  # проходимо по унікальним класам міток\n",
+    "        # обчислюємо кількість true positives, false positives та false negatives для поточного класу\n",
+    "        true_positives = np.sum((true_labels == predicted_labels) & (true_labels == _cls))\n",
+    "        false_positives = np.sum((true_labels != predicted_labels) & (predicted_labels == _cls))\n",
+    "        false_negatives = np.sum((true_labels != predicted_labels) & (true_labels == _cls))\n",
+    "\n",
+    "        # обчислюємо точність, відновлення та F1 для поточного класу\n",
+    "        precision = np.nan_to_num(true_positives / (true_positives + false_positives), nan=0.0)\n",
+    "        recall = np.nan_to_num(true_positives / (true_positives + false_negatives), nan=0.0)\n",
+    "        f1_score = np.nan_to_num(2 * (precision * recall) / (precision + recall), nan=0.0)\n",
+    "\n",
+    "        scores.append(f1_score)  # додаємо значення F1 до списку\n",
+    "    return np.array(scores)  # повертаємо масив зі значеннями F1 для кожного класу"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "bcdea345-fd99-4835-b15c-3b0d8b46c08a",
+   "metadata": {
+    "id": "bcdea345-fd99-4835-b15c-3b0d8b46c08a"
+   },
+   "outputs": [],
+   "source": [
+    "def train_one_epoch(\n",
+    "    model: nn.Module,\n",
+    "    loader: DataLoader,\n",
+    "    criterion: nn.Module,\n",
+    "    optimizer: optim.Optimizer,\n",
+    "    device: str = \"cpu\",\n",
+    "    verbose: bool = True,\n",
+    ") -> Mapping[str, np.array]:\n",
+    "    \"\"\"Train model one epoch.\n",
+    "\n",
+    "    Args:\n",
+    "        model: model to train.\n",
+    "        loader: dataloader to use for training.\n",
+    "        criterion: loss function to optimize.\n",
+    "        optimizer: model training algorithm.\n",
+    "        device: device to use for training.\n",
+    "            Default is `\"cpu\"`.\n",
+    "        verbose: option to print training progress bar.\n",
+    "            Default is `True`.\n",
+    "\n",
+    "    Returns:\n",
+    "        dict with training logs\n",
+    "    \"\"\"\n",
+    "    model.train()  # переведення моделі у режим тренування\n",
+    "\n",
+    "    losses = []  # список для зберігання значень втрат\n",
+    "    scores = []  # список для зберігання значень метрики F1\n",
+    "\n",
+    "    # ініціалізація прогрес-бару\n",
+    "    with tqdm(total=len(loader), desc=\"training\", file=sys.stdout, ncols=100, disable=not verbose) as progress:\n",
+    "        for x_batch, y_true in loader:  # проходимо по кожному пакету даних у загальному наборі даних\n",
+    "            x_batch = x_batch.to(device)  # переносимо пакет даних на пристрій\n",
+    "            y_true = y_true.to(device)    # переносимо мітки на пристрій\n",
+    "\n",
+    "            optimizer.zero_grad()  # обнулення градієнтів\n",
+    "\n",
+    "            log_prob = model(x_batch)  # передбачення моделі\n",
+    "\n",
+    "            B, T = y_true.shape  # отримуємо розмірність батчу та довжини послідовності\n",
+    "            loss = criterion(log_prob.view(B * T, -1), y_true.view(B * T))  # обчислення втрат\n",
+    "\n",
+    "            loss.backward()  # обчислення градієнтів\n",
+    "            losses.append(loss.item())  # додаємо значення втрат до списку\n",
+    "\n",
+    "            # отримуємо масиви NumPy для міток та передбачень\n",
+    "            y_pred = log_prob.argmax(2).detach().cpu().numpy()\n",
+    "            y_true = y_true.detach().cpu().numpy()\n",
+    "\n",
+    "            # обчислюємо метрику F1 для кожного зразка в пакеті\n",
+    "            padding_mask = y_true != NER_PAD_ID\n",
+    "            for i in range(x_batch.size(0)):\n",
+    "                scores.append(sequence_f1(y_true[i][padding_mask[i]], y_pred[i][padding_mask[i]]))\n",
+    "\n",
+    "            # оновлення інформації у прогрес-барі\n",
+    "            progress.set_postfix_str(f\"loss {losses[-1]:.4f}\")\n",
+    "\n",
+    "            optimizer.step()  # оновлення параметрів моделі\n",
+    "\n",
+    "            progress.update(1)  # оновлення прогресу у прогрес-барі\n",
+    "\n",
+    "    logs = {\n",
+    "        \"losses\": np.array(losses),  # значення втрат\n",
+    "        \"f1\": np.array(scores)        # значення метрики F1\n",
+    "    }\n",
+    "    return logs  # повертаємо журнал тренування у формі словника\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ef5ee906-9afd-494a-a8ec-78bd94117a34",
+   "metadata": {
+    "id": "ef5ee906-9afd-494a-a8ec-78bd94117a34"
+   },
+   "outputs": [],
+   "source": [
+    "@torch.inference_mode()\n",
+    "def evaluate(\n",
+    "    model: nn.Module,\n",
+    "    loader: DataLoader,\n",
+    "    criterion: nn.Module,\n",
+    "    device: str = \"cpu\",\n",
+    "    verbose: bool = True,\n",
+    ") -> Mapping[str, np.array]:\n",
+    "    \"\"\"Model evaluation.\n",
+    "\n",
+    "    Args:\n",
+    "        model: model to evaluate.\n",
+    "        loader: dataloader to use for evaluation.\n",
+    "        criterion: loss function.\n",
+    "        device: device to use for evaluation.\n",
+    "            Default is `\"cpu\"`.\n",
+    "        verbose: option to print evaluation progress bar.\n",
+    "            Default is `True`.\n",
+    "\n",
+    "    Returns:\n",
+    "        dict with evaluation logs\n",
+    "    \"\"\"\n",
+    "    model.eval()  # переведення моделі у режим оцінювання\n",
+    "\n",
+    "    losses = []  # список для зберігання значень втрат\n",
+    "    scores = []  # список для зберігання значень метрики F1\n",
+    "\n",
+    "    # ініціалізація прогрес-бару\n",
+    "    for x_batch, y_true in tqdm(loader, desc=\"evaluation\", file=sys.stdout, ncols=100, disable=not verbose):\n",
+    "        x_batch = x_batch.to(device)  # переносимо пакет даних на пристрій\n",
+    "        y_true = y_true.to(device)    # переносимо мітки на пристрій\n",
+    "\n",
+    "        log_prob = model(x_batch)  # передбачення моделі\n",
+    "\n",
+    "        B, T = y_true.shape  # отримуємо розмірність батчу та довжини послідовності\n",
+    "        loss = criterion(log_prob.view(B * T, -1), y_true.view(B * T))  # обчислення втрат\n",
+    "\n",
+    "        losses.append(loss.item())  # додаємо значення втрат до списку\n",
+    "\n",
+    "        # отримуємо масиви NumPy для міток та передбачень\n",
+    "        y_pred = log_prob.argmax(2).detach().cpu().numpy()\n",
+    "        y_true = y_true.detach().cpu().numpy()\n",
+    "\n",
+    "        # обчислюємо метрику F1 для кожного зразка в пакеті\n",
+    "        padding_mask = y_true != NER_PAD_ID\n",
+    "        for i in range(x_batch.size(0)):\n",
+    "            scores.append(sequence_f1(y_true[i][padding_mask[i]], y_pred[i][padding_mask[i]]))\n",
+    "\n",
+    "    logs = {\n",
+    "        \"losses\": np.array(losses),  # значення втрат\n",
+    "        \"f1\": np.array(scores)        # значення метрики F1\n",
+    "    }\n",
+    "    return logs  # повертаємо журнал оцінювання у формі словника"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8a1f67db-36bd-4f2b-8c3a-c1e6b9423d09",
+   "metadata": {
+    "id": "8a1f67db-36bd-4f2b-8c3a-c1e6b9423d09"
+   },
+   "source": [
+    "## Modeling"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "780f102c-86bb-4535-a87b-f1b80ac659d3",
+   "metadata": {
+    "id": "780f102c-86bb-4535-a87b-f1b80ac659d3"
+   },
+   "outputs": [],
+   "source": [
+    "#######################################################################\n",
+    "# TODO: play with architecture to achieve a better score\n",
+    "#######################################################################\n",
+    "\n",
+    "class NER_RNN(nn.Module):\n",
+    "    def __init__(self, vocab_size, input_size, hidden_size, num_hidden_layers, num_classes):\n",
+    "        super(NER_RNN, self).__init__()\n",
+    "        # mapping from token_id to its vector representation\n",
+    "        self.embed = nn.Embedding(vocab_size, input_size, padding_idx=TOK_PAD_ID)\n",
+    "        # some RNN, could be nn.RNN, nn.LSTM, nn.GRU\n",
+    "        self.rnn = nn.GRU(\n",
+    "            input_size, hidden_size, num_hidden_layers, bidirectional=True, dropout=0.2, batch_first=True\n",
+    "        )\n",
+    "        # norm layer\n",
+    "        self.layer_norm = nn.LayerNorm(hidden_size * 2)   # * 2 because of `bidirectional=True`\n",
+    "        # classification head\n",
+    "        self.fc = nn.Linear(hidden_size * 2, num_classes)  # * 2 because of `bidirectional=True`\n",
+    "\n",
+    "    def forward(self, x):\n",
+    "        x = self.embed(x)  # вбудовування токенів\n",
+    "        x, _ = self.rnn(x)  # рекурентний шар\n",
+    "        x = self.layer_norm(x)  # нормалізація шару\n",
+    "        x = F.relu(x)  # функція активації ReLU\n",
+    "        x = self.fc(x)  # класифікаційний шар\n",
+    "        scores = torch.log_softmax(x, dim=2)  # обчислення логарифмованих ймовірностей класів\n",
+    "        return scores"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c86e4cb8-42ad-4745-89a6-7b4ec4aa42df",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "c86e4cb8-42ad-4745-89a6-7b4ec4aa42df",
+    "outputId": "f3975a17-2be8-4164-dd0d-635693027f3a"
+   },
+   "outputs": [],
+   "source": [
+    "#######################################################################\n",
+    "# TODO: add learning rate scheduler\n",
+    "#######################################################################\n",
+    "\n",
+    "device = \"cuda\" if torch.cuda.is_available() else \"cpu\"  # визначення пристрою для обчислень\n",
+    "print(f\"Device - {device}\")\n",
+    "\n",
+    "torch.manual_seed(42)  # встановлення випадкових налаштувань для відтворюваності результатів\n",
+    "model = NER_RNN(len(vocab), 512, 512, 3, len(targets))  # ініціалізація моделі\n",
+    "model = model.to(device)  # переміщення моделі на пристрій\n",
+    "print(model)\n",
+    "print(\"Number of trainable parameters -\", sum(p.numel() for p in model.parameters() if p.requires_grad))  # виведення кількості параметрів моделі, які підлягають навчанню\n",
+    "\n",
+    "criterion = nn.CrossEntropyLoss(ignore_index=-100)  # визначення критерію (функції втрат)\n",
+    "optimizer = optim.Adam(model.parameters(), lr=1e-4)  # визначення оптимізатора з початковою швидкістю навчання"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d7fe6462-2f13-4f5f-8d9c-efc24d657f7b",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "d7fe6462-2f13-4f5f-8d9c-efc24d657f7b",
+    "outputId": "fcb14961-d8ca-402c-8aaa-507bbba3f4b9"
+   },
+   "outputs": [],
+   "source": [
+    "n_epochs = 30  # кількість епох навчання\n",
+    "\n",
+    "train_losses = []  # список для зберігання втрат на тренувальному наборі\n",
+    "train_scores = []  # список для зберігання значень метрики F1 на тренувальному наборі\n",
+    "\n",
+    "valid_losses = []  # список для зберігання втрат на валідаційному наборі\n",
+    "valid_scores = []  # список для зберігання значень метрики F1 на валідаційному наборі\n",
+    "\n",
+    "best_score = float(\"-inf\")  # початкове значення для порівняння кращих результатів\n",
+    "\n",
+    "# цикл по епохам навчання\n",
+    "for ep in range(n_epochs):\n",
+    "    print(f\"\\nEpoch {ep + 1:2d}/{n_epochs:2d}\")\n",
+    "\n",
+    "    # навчання моделі на тренувальному наборі\n",
+    "    train_logs = train_one_epoch(model, train_loader, criterion, optimizer, device, verbose=True)\n",
+    "    train_losses.append(np.mean(train_logs[\"losses\"]))\n",
+    "    train_scores.append(np.mean(train_logs[\"f1\"], 0))\n",
+    "    print(\"      loss:\", train_losses[-1])\n",
+    "    print(\"        f1:\", train_scores[-1])\n",
+    "\n",
+    "    # оцінка моделі на валідаційному наборі\n",
+    "    valid_logs = evaluate(model, validation_loader, criterion, device, verbose=True)\n",
+    "    valid_losses.append(np.mean(valid_logs[\"losses\"]))\n",
+    "    valid_scores.append(np.mean(valid_logs[\"f1\"], 0))\n",
+    "    print(\"      loss:\", valid_losses[-1])\n",
+    "    print(\"        f1:\", valid_scores[-1])\n",
+    "\n",
+    "    # зберігання найкращого стану моделі\n",
+    "    if valid_scores[-1].mean() >= best_score:\n",
+    "        checkpoint = {\n",
+    "            \"model_state_dict\": model.state_dict(),\n",
+    "            \"optimizer_state_dict\": optimizer.state_dict(),\n",
+    "            \"epoch\": ep,\n",
+    "            \"num_epochs\": n_epochs,\n",
+    "            \"metrics\": {\n",
+    "                \"training\": {\"loss\": train_losses[-1], \"accuracy\": train_scores[-1]},\n",
+    "                \"validation\": {\"loss\": valid_losses[-1], \"accuracy\": valid_scores[-1]},\n",
+    "            },\n",
+    "        }\n",
+    "        torch.save(checkpoint, \"best.pth\")\n",
+    "        print(\"🟢 Saved new best state! 🟢\")\n",
+    "        best_score = valid_scores[-1].mean()  # оновлення кращого результату до нового значення"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "37aac7a1-7546-4c8c-86ad-86708d2a02b8",
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/",
+     "height": 519
+    },
+    "id": "37aac7a1-7546-4c8c-86ad-86708d2a02b8",
+    "outputId": "e6fe71bc-0a77-4c12-f98c-a6046f0f7f00"
+   },
+   "outputs": [],
+   "source": [
+    "# NOTE: plot training and validation performance\n",
+    "fig, axes = plt.subplots(ncols=2, figsize=(22, 6))\n",
+    "\n",
+    "axes[0].plot(np.arange(len(train_losses)), train_losses, \".-\")\n",
+    "axes[0].plot(np.arange(len(valid_losses)), valid_losses, \".-\")\n",
+    "axes[0].legend([\"train\", \"validation\"])\n",
+    "axes[0].set_title(\"Loss\")\n",
+    "axes[0].grid()\n",
+    "\n",
+    "axes[1].plot(np.arange(len(train_scores)), [item.mean() for item in train_scores], \".-\")\n",
+    "axes[1].plot(np.arange(len(valid_scores)), [item.mean() for item in valid_scores], \".-\")\n",
+    "axes[1].legend([\"train\", \"validation\"])\n",
+    "axes[1].set_title(\"F1\")\n",
+    "axes[1].grid();"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "T_mfdkqoMKIh",
+   "metadata": {
+    "id": "T_mfdkqoMKIh"
+   },
+   "outputs": [],
+   "source": [
+    "#######################################################################\n",
+    "# TODO: load model best state\n",
+    "#######################################################################\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "27190acf-4e1d-41b8-bdea-8f73b9239351",
+   "metadata": {
+    "id": "27190acf-4e1d-41b8-bdea-8f73b9239351"
+   },
+   "outputs": [],
+   "source": [
+    "#######################################################################\n",
+    "# TODO: write evaluation function for a test set.\n",
+    "#######################################################################\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "eLyidJutRIvr",
+   "metadata": {
+    "id": "eLyidJutRIvr"
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "accelerator": "GPU",
+  "colab": {
+   "provenance": []
+  },
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.10"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
