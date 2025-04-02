@@ -7,24 +7,28 @@ A deep learning model for classifying DNA sequences as either Paramoeba or Perki
 This project implements a hybrid **CNN-LSTM** architecture to **classify DNA sequence fragments from a metagenome containing both Paramoeba and Perkinsela species**. The model processes DNA sequence fragments of 1000 nucleotides and predicts their taxonomic classification with high accuracy (**Figure 1**).
 
 The key results achieved on the 25th epoch:
-*Table 1. Key performance metrics*
-| Metric | Train | Validation |
-| :--: | :--: | :--: |
-| Loss | 0.010 | 0.012 |
-| Accuracy (%) | 99.74 | 99.66 |
-| Precision (%) | 99.17 | 99.07 |
-| Recall (%) | 99.59 | 99.31 |
-| F1 (%) | 99.38 | 99.19 |
+***Table 1.*** *Key performance metrics*
 
-![Figure 1. Key Performance Metics (Loss, Accuracy, Precision, Recall, F1)](files/Metrics.png "Key Performance Metics")
-*Figure 1. Results for loss, accuracy, precision, recall and f1 score for training and validation modes over 25 epochs.*
+|    Metric    | Train | Validation |
+| :-----------: | :---: | :--------: |
+|     Loss     | 0.010 |   0.012   |
+| Accuracy (%) | 99.74 |   99.66   |
+| Precision (%) | 99.17 |   99.07   |
+|  Recall (%)  | 99.59 |   99.31   |
+|    F1 (%)    | 99.38 |   99.19   |
+
+![Figure 1. Key Performance Metics (Loss, Accuracy, Precision, Recall, F1)](files/Metrics.png "Key Performance Metics")  
+***Figure 1.*** *Results for loss, accuracy, precision, recall and f1 score for training and validation modes over 25 epochs.*
 
 ## Architecture
 
 The model employs a hybrid approach with convolutional layers for feature extraction followed by bidirectional LSTM for sequence modeling as shown at **Figure 2**.
 
-![Figure 2. ParaPerk Classifier Simplified Architecture)](files/simplified_architecture.svg "ParaPerk Classifier Simplified Architecture")
-*Figure 2. ParaPerk Classifier Simplified Architecture*
+![Figure 2. ParaPerk Classifier Simplified Architecture)](files/simplified_architecture.svg "ParaPerk Classifier Simplified Architecture") 
+
+***Figure 2.*** *ParaPerk Classifier Simplified Architecture*
+
+![Figure 3. ParaPerk Classifier Detailed Architecture)](files/detailed_architecture.svg "ParaPerk Classifier Detailed Architecture") ***Figure 3.*** *ParaPerk Classifier Detailed Architecture (svg is available in the repository)*
 
 * Input layer accepting DNA sequences encoded as 5-feature vectors (4 for nucleotides + 1 for low complexity flag)
 * Two convolutional layers with max pooling for local feature extraction
